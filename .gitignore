@@ -10,6 +10,7 @@ env/
 # Build outputs
 build/
 dist/
+release/
 
 # Local runtime and diagnostics
 *.log
@@ -21,6 +22,7 @@ startup.log
 # Local secrets and environment
 .env
 .env.*
+drivers/msedgedriver.exe
 
 # OS/editor
 .DS_Store

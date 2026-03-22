@@ -161,6 +161,44 @@ def _find_edge_executable() -> Optional[str]:
     return found
 
 
+def _find_bundled_msedgedriver() -> Optional[str]:
+    candidates = []
+
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(os.path.abspath(sys.executable)).parent
+        candidates.extend(
+            [
+                exe_dir / "msedgedriver.exe",
+                exe_dir / "drivers" / "msedgedriver.exe",
+            ]
+        )
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            meipass_dir = Path(str(meipass))
+            candidates.extend(
+                [
+                    meipass_dir / "msedgedriver.exe",
+                    meipass_dir / "drivers" / "msedgedriver.exe",
+                ]
+            )
+    else:
+        base_dir = Path(__file__).resolve().parent
+        candidates.extend(
+            [
+                base_dir / "msedgedriver.exe",
+                base_dir / "drivers" / "msedgedriver.exe",
+            ]
+        )
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def _default_profile_dir() -> str:
     return str(_local_app_data_dir() / APP_NAME / "edge-profile")
 
@@ -297,6 +335,19 @@ class PortalAutomator:
         self._retained_drivers = []
         self._last_local_edge_fallback_at = 0.0
 
+    @staticmethod
+    def _is_driver_bootstrap_error(message: str) -> bool:
+        lowered = (message or "").lower()
+        keywords = (
+            "unable to obtain driver",
+            "selenium manager",
+            "msedgedriver",
+            "driver location",
+            "cannot find msedge binary",
+            "edge driver",
+        )
+        return any(token in lowered for token in keywords)
+
     def ensure_logged_in(
         self,
         config: AppConfig,
@@ -356,6 +407,22 @@ class PortalAutomator:
         except WebDriverException as exc:
             short_msg = str(exc).splitlines()[0] if str(exc) else repr(exc)
             logger(f"Selenium/Edge 运行异常: {short_msg}")
+            if self._is_driver_bootstrap_error(short_msg):
+                bundled = _find_bundled_msedgedriver()
+                if bundled:
+                    logger(f"已检测到内置 EdgeDriver: {bundled}")
+                else:
+                    logger(
+                        "未检测到内置 EdgeDriver。若目标电脑无开发环境/无外网，"
+                        "请使用包含 drivers\\msedgedriver.exe 的发布包。"
+                    )
+                self.open_portal_in_local_edge(
+                    config,
+                    logger,
+                    source=source,
+                    reason="webdriver_bootstrap_failed",
+                    force=False,
+                )
             keep_browser_open = config.keep_browser_on_failure
             return LoginResult.FAILED
         except Exception as exc:
@@ -398,13 +465,30 @@ class PortalAutomator:
             "creation_flags": CREATE_NO_WINDOW,
             "log_output": subprocess.DEVNULL,
         }
-        try:
-            service = EdgeService(**service_kwargs)
-        except TypeError:
-            service_kwargs.pop("creation_flags", None)
+        driver_executable = _find_bundled_msedgedriver()
+        if driver_executable:
+            service_kwargs["executable_path"] = driver_executable
+
+        service = None
+        kwargs_variants = [
+            {},
+            {"creation_flags"},
+            {"log_output"},
+            {"creation_flags", "log_output"},
+        ]
+        for keys_to_drop in kwargs_variants:
+            candidate_kwargs = dict(service_kwargs)
+            for key in keys_to_drop:
+                candidate_kwargs.pop(key, None)
             try:
-                service = EdgeService(**service_kwargs)
+                service = EdgeService(**candidate_kwargs)
+                break
             except TypeError:
+                continue
+        if service is None:
+            if driver_executable:
+                service = EdgeService(executable_path=driver_executable)
+            else:
                 service = EdgeService()
         return webdriver.Edge(service=service, options=options)
 
